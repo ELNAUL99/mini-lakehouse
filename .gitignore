@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Local secrets / env (never commit)
+.env
+deploy/compose/.env
+
+# Data / local state
+*.parquet
+notebooks/.ipynb_checkpoints/
+
+# OS
+.DS_Store

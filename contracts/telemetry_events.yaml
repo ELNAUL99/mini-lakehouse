@@ -1,0 +1,46 @@
+# Declarative dataset contract (design doc section 7).
+#
+# CI validates this file; the Platform API provisions the Kafka topic, the DLQ,
+# and the Iceberg table from it. A change here is a reviewed pull request.
+#
+# Compatibility policy: adding OPTIONAL fields is allowed; removing, renaming, or
+# retyping a field is rejected unless a new major version is created.
+name: telemetry.events
+owner: data-platform-chapter
+description: Validated game telemetry (session, match, purchase) landing in bronze.events.
+key: player_id            # Kafka message key -> per-player ordering
+idempotency_key: event_id # dedupe / effectively-once anchor
+retention_days: 7
+pii: false
+
+topic:
+  name: telemetry.events.v1
+  partitions: 12
+  dlq: telemetry.events.dlq
+
+table:
+  identifier: bronze.events
+  format: iceberg
+  partitioning:
+    - day(event_time)
+    - bucket(16, player_id)
+  sort_order:
+    - event_time
+
+schema:
+  version: 1
+  fields:
+    - { name: event_id,       type: string,    required: true,  doc: "UUIDv7, idempotency key" }
+    - { name: event_type,     type: string,    required: true,  doc: "session_start|match_end|purchase" }
+    - { name: event_time,     type: timestamp, required: true,  doc: "UTC, when it happened on the client" }
+    - { name: ingest_time,    type: timestamp, required: true,  doc: "UTC, set by the gateway" }
+    - { name: player_id,      type: string,    required: true,  doc: "Kafka key" }
+    - { name: schema_version, type: int,       required: true,  doc: "drives validation and evolution" }
+    - { name: payload,        type: string,    required: true,  doc: "JSON-encoded type-specific fields" }
+
+# v2 example (not yet active): adds optional payload.platform. Kept here to show
+# the evolution is additive and therefore backward compatible.
+evolution:
+  - version: 2
+    change: "add optional payload.platform (string)"
+    compatible: true

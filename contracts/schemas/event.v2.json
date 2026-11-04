@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mini-lakehouse/telemetry/event.v2.json",
+  "title": "Telemetry event envelope v2",
+  "description": "v2 adds optional payload.platform (string). Backward compatible with v1.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_type",
+    "event_time",
+    "ingest_time",
+    "player_id",
+    "schema_version",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "event_type": { "enum": ["session_start", "match_end", "purchase"] },
+    "event_time": { "type": "string", "format": "date-time" },
+    "ingest_time": { "type": "string", "format": "date-time" },
+    "player_id": { "type": "string", "minLength": 1 },
+    "schema_version": { "const": 2 },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "platform": { "type": "string" }
+      }
+    }
+  }
+}
