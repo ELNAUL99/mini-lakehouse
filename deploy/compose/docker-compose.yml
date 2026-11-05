@@ -44,6 +44,11 @@ services:
     depends_on: [redpanda]
 
   minio:
+    # NOTE: MinIO's public images on Docker Hub and quay.io now require auth
+    # ("pull access denied"). To run the stack either `docker login` with an
+    # account that can pull minio/minio + minio/mc, or swap both for an
+    # accessible S3-compatible image. The Iceberg write path itself is verified
+    # without object storage: `pytest -m integration` (local filesystem catalog).
     image: minio/minio:RELEASE.2024-09-13T20-26-02Z
     profiles: [core]
     command: server /data --console-address ":9001"
@@ -85,7 +90,7 @@ services:
       retries: 10
 
   iceberg-rest:
-    image: apache/iceberg-rest-fixture:1.6.0
+    image: apache/iceberg-rest-fixture:latest  # TODO: pin to a digest (the 1.6.0 tag does not exist)
     profiles: [core]
     depends_on:
       postgres: {condition: service_healthy}

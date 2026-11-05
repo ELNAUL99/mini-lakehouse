@@ -150,14 +150,22 @@ rows read as null.
 - Maintenance **health metrics**, and the Iceberg **schema / partition spec /
   struct-payload Arrow conversion**, unit-checked for API-correctness against
   PyIceberg 0.12.
+- **The Iceberg write path against a real Iceberg table** — `pytest -m integration`
+  (`tests/integration/test_iceberg_local.py`) provisions `bronze.events` through a
+  PyIceberg `SqlCatalog` on a local filesystem warehouse and runs `ensure_table`,
+  partitioned struct-payload `append_batch`, snapshot-history offset recovery, and
+  the **kill-and-count exactly-once** loop against real Parquet — no containers.
+  (Requires `pip install .[adapters] sqlalchemy`, incl. `pyiceberg-core` for the
+  day/bucket partition transforms.)
 
-**Not yet verified** (needs the live stack on your machine or CI with
-Testcontainers):
+**Not yet verified** (needs the full container stack):
 
-- The Iceberg adapter writing to a real REST catalog + MinIO (`append`, `upsert`,
-  `overwrite` compaction, `expire_snapshots`).
-- The Kafka adapter against a real broker (manual-commit, cooperative rebalance).
-- End-to-end gateway → Kafka → Iceberg, and the integration/Testcontainers test.
+- The write path specifically against the **REST-catalog-on-MinIO** deployment
+  (vs. the local filesystem catalog above). `make up` is currently blocked here by
+  MinIO's public images now requiring authentication on both Docker Hub and
+  quay.io — see the note in `deploy/compose/docker-compose.yml`.
+- The Kafka adapter against a real broker (manual-commit, cooperative rebalance)
+  and end-to-end gateway → Kafka → Iceberg.
 - **Benchmarks**: no throughput/latency numbers are published yet — they go here
   once measured, with the hardware stated. No number is claimed until it is run.
 
