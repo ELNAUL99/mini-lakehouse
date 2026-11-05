@@ -81,6 +81,11 @@ no_implicit_optional = true
 module = ["mini_lakehouse.adapters.*"]
 ignore_missing_imports = true
 
+# Third-party libraries without type stubs / py.typed markers.
+[[tool.mypy.overrides]]
+module = ["confluent_kafka.*", "pyarrow.*", "pyiceberg.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"

@@ -23,14 +23,15 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from mini_lakehouse.domain.dedupe import merge_committed_offsets
 from mini_lakehouse.domain.events import EventEnvelope, EventParseError, parse_event
-from mini_lakehouse.domain.partitioning import group_by_partition
+from mini_lakehouse.domain.partitioning import PartitionKey, group_by_partition
 from mini_lakehouse.ports.interfaces import (
     CommitConflict,
+    CommitResult,
     ConsumedRecord,
     DeadLetterSink,
     EventSource,
@@ -204,11 +205,11 @@ class Ingestor:
 
     def _append_with_retry(
         self,
-        groups: object,
+        groups: Mapping[PartitionKey, Sequence[EventEnvelope]],
         batch_end_offsets: dict[int, int],
         batch_id: str,
         records: Sequence[ConsumedRecord],
-    ) -> tuple[object, int]:
+    ) -> tuple[CommitResult | None, int]:
         """Append with optimistic-concurrency retry (design doc section 6, step 3).
 
         Returns ``(CommitResult, attempts)`` on success, or ``(None, attempts)``
@@ -219,7 +220,7 @@ class Ingestor:
         for attempt in range(1, cfg.commit_max_attempts + 1):
             last_attempt = attempt
             try:
-                result = self._writer.append_batch(groups, batch_end_offsets, batch_id)  # type: ignore[arg-type]
+                result = self._writer.append_batch(groups, batch_end_offsets, batch_id)
                 return result, attempt
             except CommitConflict:
                 if attempt >= cfg.commit_max_attempts:

@@ -1,15 +1,23 @@
-"""Maintenance jobs: compaction, snapshot expiry, orphan cleanup, health report.
+"""Maintenance jobs: compaction, snapshot expiry, health report.
 
 A separate process from ingestion (design doc section 6) so a maintenance failure
-never blocks writes. PyIceberg's rewrite/expiry surface is still maturing, so the
-honest implementation here does what the current API supports and documents the
-rest -- matching the risk noted in the design doc ("PyIceberg write API is less
-mature for streaming").
+never blocks writes. Written against the real PyIceberg 0.12 API:
+
+* **compaction** is copy-on-write via :meth:`IcebergTableWriter.compact_partition`
+  (scan a partition, ``overwrite`` it into fewer target-sized files). PyIceberg
+  0.12 has no bin-pack ``rewrite_data_files``; copy-on-write is the honest local
+  equivalent and matches the design doc's copy-on-write choice. The nightly
+  all-partition pass is where a Spark/Trino rewrite would slot in at scale.
+* **snapshot expiry** uses ``table.maintenance.expire_snapshots().older_than(dt).commit()``.
+* **health** is computed by the pure :func:`compute_health`.
+
+NOTE: API-correct against PyIceberg 0.12; not yet run against a live catalog here.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 from .health import HealthReport, compute_health
 
@@ -35,34 +43,39 @@ class MaintenanceWorker:
             partition_counts[key] = partition_counts.get(key, 0) + 1
         report = compute_health(sizes, partition_counts)
         if report.small_file_ratio > 0.5:
-            log.warning("%s: small-file ratio %.2f -- compaction needed",
-                        identifier, report.small_file_ratio)
+            log.warning(
+                "%s: small-file ratio %.2f -- compaction needed",
+                identifier,
+                report.small_file_ratio,
+            )
         return report
 
-    def compact(self, identifier: str) -> None:
-        """Rewrite small files toward the 128 MB target.
+    def compact(self, identifier: str, row_filter: str = "") -> int:
+        """Copy-on-write compaction of one partition selected by ``row_filter``.
 
-        Uses PyIceberg data-file rewrite where available; on engines/versions
-        without it, this logs and defers to the scheduled nightly Spark/Trino
-        compaction documented in the ADR. Intentionally conservative: compaction
-        must never corrupt a table.
+        Returns rows rewritten. Pass a bounded partition filter on the 15-minute
+        hot-partition pass, e.g. ``"event_day = '2026-11-04'"``. A whole-table
+        rewrite is intentionally NOT done here (expensive, and risky without a
+        bin-pack planner); that is the nightly Spark/Trino pass noted in the ADR.
+        """
+        if not row_filter:
+            log.info("%s: whole-table compaction deferred to nightly Spark/Trino", identifier)
+            return 0
+        from mini_lakehouse.adapters.iceberg import IcebergTableWriter
+
+        writer = IcebergTableWriter(identifier, self._catalog)
+        rewritten = writer.compact_partition(row_filter)
+        log.info("%s: compacted %d rows (filter=%r)", identifier, rewritten, row_filter)
+        return rewritten
+
+    def expire_snapshots(self, identifier: str, *, older_than_days: int = 7) -> None:
+        """Expire snapshots older than ``older_than_days`` (daily).
+
+        PyIceberg 0.12 exposes ``older_than``/``by_id`` (no ``retain_last``); we
+        expire strictly by age, which keeps time travel useful within the window
+        and bounds metadata growth (design doc section 7).
         """
         table = self._catalog.load_table(identifier)
-        rewrite = getattr(table, "rewrite_data_files", None)
-        if callable(rewrite):
-            rewrite(target_file_size_bytes=128 * 1024 * 1024)
-            log.info("%s: compaction committed", identifier)
-        else:  # pragma: no cover
-            log.info("%s: rewrite_data_files unavailable in this PyIceberg; skipped", identifier)
-
-    def expire_snapshots(
-        self, identifier: str, *, retain_last: int = 20, older_than_days: int = 7
-    ) -> None:
-        """Expire snapshots older than N days, keeping the last ``retain_last`` (daily)."""
-        table = self._catalog.load_table(identifier)
-        expire = getattr(table, "expire_snapshots", None)
-        if callable(expire):  # pragma: no cover - depends on PyIceberg version
-            expire(retain_last=retain_last, older_than_days=older_than_days)
-            log.info("%s: snapshot expiry committed", identifier)
-        else:  # pragma: no cover
-            log.info("%s: expire_snapshots unavailable; deferring", identifier)
+        cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
+        table.maintenance.expire_snapshots().older_than(cutoff).commit()
+        log.info("%s: expired snapshots older than %s", identifier, cutoff.isoformat())

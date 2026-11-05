@@ -36,11 +36,20 @@ schema:
     - { name: ingest_time,    type: timestamp, required: true,  doc: "UTC, set by the gateway" }
     - { name: player_id,      type: string,    required: true,  doc: "Kafka key" }
     - { name: schema_version, type: int,       required: true,  doc: "drives validation and evolution" }
-    - { name: payload,        type: string,    required: true,  doc: "JSON-encoded type-specific fields" }
+    - { name: payload,        type: struct,    required: false, doc: "type-specific fields; a real Iceberg struct, not a JSON string" }
 
-# v2 example (not yet active): adds optional payload.platform. Kept here to show
-# the evolution is additive and therefore backward compatible.
+# payload is a struct so schema evolution is an add-column-by-ID (no rewrite) and
+# the column stays queryable for OLAP. Known optional subfields:
+payload_fields:
+  - { name: match_id,       type: string, required: false }
+  - { name: duration_s,     type: long,   required: false }
+  - { name: item_id,        type: string, required: false }
+  - { name: price_cents,    type: long,   required: false }
+  - { name: client_version, type: string, required: false }
+  - { name: platform,       type: string, required: false, since: 2 }  # added in v2
+
+# v2 adds optional payload.platform. Additive => backward compatible.
 evolution:
   - version: 2
-    change: "add optional payload.platform (string)"
+    change: "add optional payload.platform (string) as a nested struct field"
     compatible: true
