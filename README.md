@@ -7,7 +7,9 @@ platform-building skill — storage, streaming, compute, and a self-serve interf
 for internal customers — not pipeline-running skill.
 
 > This is a **learning build with production-style design**, not a claim of
-> production experience with Kafka or Iceberg.
+> production experience with Kafka or Iceberg. See
+> [Verified vs not verified](#verified-vs-not-verified) for exactly what has and
+> has not been run.
 
 ## Why this exists
 
@@ -25,7 +27,7 @@ This project demonstrates that end to end on open-source infrastructure.
  (JSON Schema)                               skip committed            silver.player_daily / meta.table_health
                                                                               │
      platform-api (FastAPI) ── register datasets, schema, lineage, health ────┘
-     maintenance ── compaction, snapshot expiry, orphan cleanup, health report
+     maintenance ── copy-on-write compaction, snapshot expiry, health report
 ```
 
 Four application services share only the **catalog** and the **tables**:
@@ -34,24 +36,24 @@ Four application services share only the **catalog** and the **tables**:
 |----------------|----------------------------------------------------|------|
 | `gateway`      | Produce + validate synthetic telemetry             | 8001 |
 | `ingestor`     | Kafka → Iceberg consumer, effectively-once commits | —    |
-| `maintenance`  | Compaction, snapshot expiry, health report         | —    |
+| `maintenance`  | Copy-on-write compaction, snapshot expiry, health  | —    |
 | `platform-api` | FastAPI control plane for internal customers       | 8000 |
 
 ### Hexagonal core
 
-Domain logic (dedupe, partition rules, contract checks) has **no I/O** and is
-tested without containers. Kafka, Iceberg, and Postgres sit behind **ports**
-(`src/mini_lakehouse/ports`). That is what lets the entire commit protocol —
-including crashes — be proven with in-memory fakes.
+Domain logic (dedupe, partition rules, offset recovery, contract checks) has **no
+I/O** and is tested without containers. Kafka, Iceberg, and Postgres sit behind
+**ports** (`src/mini_lakehouse/ports`). That is what lets the entire commit protocol
+— including crashes — be proven with in-memory fakes.
 
 ```
 src/mini_lakehouse/
-  domain/       pure logic: events, hashing/bucketing, dedupe, partitioning, contracts
+  domain/       pure logic: events, hashing/bucketing, dedupe, partitioning, offsets, contracts
   ports/        EventSource, TableWriter, DeadLetterSink, Catalog
-  adapters/     kafka (confluent-kafka), iceberg (pyiceberg), settings
+  adapters/     kafka (confluent-kafka), iceberg (pyiceberg 0.12), settings
   gateway/      producer + validation + synthetic generator
   ingestor/     consume loop, batching, offsets-in-snapshot commit protocol
-  maintenance/  compaction, expiry, health
+  maintenance/  copy-on-write compaction, expiry, health
   platform_api/ FastAPI app
 contracts/      dataset YAML + versioned JSON Schemas
 tests/          unit / integration / chaos
@@ -64,18 +66,17 @@ docs/           architecture.md + ADRs
 The ingestor gives **at-least-once delivery with idempotent output** by committing
 the Iceberg snapshot (with the batch's Kafka offsets in its summary) *before*
 committing offsets back to Kafka. If it dies in between, the restart reads the
-offsets from the snapshot and skips whatever is already written.
-
-The chaos test produces a known set of `event_id`s, kills the ingestor at random
-points, and asserts the table holds **exactly** those ids with **zero duplicates**:
+offsets from the snapshot history and skips whatever is already written.
 
 ```bash
 make test-chaos
 ```
 
-`tests/chaos/test_exactly_once.py` runs this across several seeds with no
-containers (the fake writer persists rows + snapshot offsets across a simulated
-crash). This is the gate that protects the project's core claim.
+`tests/chaos/test_exactly_once.py` produces a known set of `event_id`s, kills the
+ingestor at random points across several seeds, and asserts the table holds
+**exactly** those ids with **zero duplicates**. It runs with no containers — the
+fake writer persists rows + snapshot offsets across a simulated crash — so it
+proves the *commit-protocol logic*, not the live Iceberg/Kafka path (see below).
 
 ## Quickstart
 
@@ -106,10 +107,16 @@ and a small set of Iceberg tables:
 | `silver.player_daily` | Derived | `month(day)`                               | per-player daily aggregates    |
 | `meta.table_health`   | Control | —                                          | file counts, sizes, compaction |
 
+Only `bronze.events` is provisioned in code today (`IcebergTableWriter.ensure_table`);
+the silver and meta tables are modelled in the contract/docs and created by the
+jobs that populate them (see limitations).
+
 Partitioning is by **event time** (not ingest time) so queries prune on when
 things happened and late events land in the right day. `player_id` is bucketed
 into 16 buckets — the bucket is computed in pure Python with the **same Murmur3
-transform Iceberg uses**, so Python-side buckets match the engine's.
+transform Iceberg uses** (verified against canonical vectors), so Python-side
+buckets match the engine's. `payload` is a real Iceberg **struct**, not a JSON
+string, so it stays queryable and evolves by adding columns.
 
 ## Schema evolution & contracts
 
@@ -117,16 +124,64 @@ A dataset is declared in a YAML contract (`contracts/telemetry_events.yaml`); CI
 validates it and the platform provisions the topic, DLQ, and table from it. The
 compatibility checker (`domain/contracts.py`) allows adding **optional** fields and
 rejects removals, renames, and type changes — the exact rule the Platform API's
-`POST /schemas/{name}/versions` enforces. v2 adds optional `payload.platform` with
-no data rewrite (Iceberg adds the column by ID; old rows read as null).
+`POST /schemas/{name}/versions` enforces. Because `payload` is a struct, v2 adds
+optional `payload.platform` as an add-column-by-ID with **no data rewrite**; old
+rows read as null.
 
 ## Testing
 
-| Layer       | Scope                                              | How                     |
-|-------------|----------------------------------------------------|-------------------------|
-| Unit        | domain logic, gateway, maintenance, API            | `make test-unit`        |
-| Chaos       | kill-and-count exactly-once                         | `make test-chaos`       |
-| Integration | gateway→Redpanda→Iceberg on MinIO (Testcontainers) | `make test-integration` |
+| Layer       | Scope                                                      | How                     |
+|-------------|------------------------------------------------------------|-------------------------|
+| Unit        | domain, offsets, gateway, maintenance, API, Iceberg schema | `make test-unit`        |
+| Chaos       | kill-and-count exactly-once (against fakes)                | `make test-chaos`       |
+| Integration | gateway→Redpanda→Iceberg on MinIO (Testcontainers)         | `make test-integration` |
+
+## Verified vs not verified
+
+**Verified here** (runs in CI / `make test`, no live infra):
+
+- Domain logic: event parsing + DLQ reasons, Murmur3/`bucket(16,…)` against
+  canonical Iceberg vectors, dedupe (property-tested), partitioning, contract
+  compatibility, and snapshot-history **offset recovery**.
+- The effectively-once **commit protocol** under random mid-stream kills, against
+  in-memory fakes.
+- Gateway JSON-Schema validation + DLQ routing + the synthetic generator.
+- Platform API registration and the schema-compatibility endpoint.
+- Maintenance **health metrics**, and the Iceberg **schema / partition spec /
+  struct-payload Arrow conversion**, unit-checked for API-correctness against
+  PyIceberg 0.12.
+- **The Iceberg write path against a real Iceberg table** — `pytest -m integration`
+  (`tests/integration/test_iceberg_local.py`) provisions `bronze.events` through a
+  PyIceberg `SqlCatalog` on a local filesystem warehouse and runs `ensure_table`,
+  partitioned struct-payload `append_batch`, snapshot-history offset recovery, and
+  the **kill-and-count exactly-once** loop against real Parquet — no containers.
+  (Requires `pip install .[adapters] sqlalchemy`, incl. `pyiceberg-core` for the
+  day/bucket partition transforms.)
+
+**Not yet verified** (needs the full container stack):
+
+- The write path specifically against the **REST-catalog-on-MinIO** deployment
+  (vs. the local filesystem catalog above). `make up` is currently blocked here by
+  MinIO's public images now requiring authentication on both Docker Hub and
+  quay.io — see the note in `deploy/compose/docker-compose.yml`.
+- The Kafka adapter against a real broker (manual-commit, cooperative rebalance)
+  and end-to-end gateway → Kafka → Iceberg.
+- **Benchmarks**: no throughput/latency numbers are published yet — they go here
+  once measured, with the hardware stated. No number is claimed until it is run.
+
+## Known limitations
+
+- **Cross-batch dedupe granularity.** In the default `append` mode, duplicates are
+  caught per micro-batch (by `event_id`) and across crashes (by Kafka offset in the
+  snapshot). A *re-produced* `event_id` arriving at a different offset is not
+  deduped in append mode — run the ingestor in **`upsert` mode** (MERGE on
+  `event_id`) for exactly-once-by-id regardless of offset, at higher write cost.
+- **Commit-conflict exhaustion.** After the retry budget, the batch is routed to
+  the DLQ rather than blocking ingestion — a liveness-over-completeness choice;
+  the rows are recoverable from the DLQ.
+- **Compaction scope.** Local compaction is per-partition copy-on-write; a
+  whole-table bin-pack rewrite is deferred to a Spark/Trino pass (PyIceberg 0.12
+  has no native bin-packer). Orphan-file cleanup is not implemented yet.
 
 ## What changes at scale
 

@@ -24,6 +24,7 @@ def main() -> None:
 
     source = KafkaEventSource(cfg.topic, cfg.group_id)
     writer = IcebergTableWriter(cfg.table)
+    writer.ensure_table()  # create namespace + table from the contract if absent
     dlq = KafkaDeadLetterSink("telemetry.events.dlq")
     ingestor = Ingestor(source, writer, dlq, cfg)
 
