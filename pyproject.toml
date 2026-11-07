@@ -39,6 +39,7 @@ dev = [
   "types-PyYAML",
   "types-jsonschema",
   "sqlalchemy>=2.0",  # SqlCatalog for the container-free local Iceberg integration test
+  "httpx>=0.27",  # backs fastapi/starlette TestClient (not pulled by plain fastapi) for test_platform_api
 ]
 
 [project.scripts]
